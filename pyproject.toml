@@ -1,0 +1,19 @@
+[project]
+name = "ojeph"
+version = "0.1.0"
+description = "OJEPH: native full-duplex voice-to-voice AI for African languages"
+authors = [{ name = "Jephthah Ameh" }]
+requires-python = ">=3.10"
+dependencies = ["torch>=2.2", "numpy>=1.24"]
+
+[project.optional-dependencies]
+mimi = ["moshi>=0.2", "huggingface_hub"]
+train = ["sentencepiece>=0.2"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["ojeph*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
