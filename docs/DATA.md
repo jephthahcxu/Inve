@@ -36,13 +36,21 @@ from ElevenLabs timestamps. For recorded data, a forced aligner or ASR is run
 SentencePiece unigram, 32k vocab, trained on text from all six languages, with
 Yoruba/Igbo tone marks kept (`ẹ ọ ṣ à á è é`).
 
-## Compute (training, rented GPU)
+## Compute (training)
 
-| Stage | Est. GPU-hours (H100) | Est. cost @ $2–3/h |
+Rough maths for `small` (350M): ~2.4 GFLOP per training frame, and
+2,000 h of audio = 90M frames. 10 passes ≈ 2.4e18 FLOPs, which is under a day
+on one RTX 4090 at realistic utilisation. Compute is cheap at this size. Data is the bottleneck.
+
+| GPU | Fits `small` training? | 2 weeks |
 |---|---|---|
-| small (350M) pretrain + dialogue fine-tune | 800–2,000 | $2k–6k |
-| base (1.1B) | 3,000–10,000 | $8k–30k |
+| RTX 4060 8 GB | tight (batch 1–2 + checkpointing) | own it |
+| RTX 3060 12 GB / 4060 Ti 16 GB | yes | own it |
+| RTX 3090 / 4090 24 GB | comfortable | rent about $0.3–0.7/h, so roughly $100–250 for 2 weeks |
 
 These are estimates; measure tokens/sec on the first run and re-plan.
+Training longer on the same data stops helping (the model memorises it). It
+improves when new data arrives, so keep the GPU fed with new recordings
+and flywheel calls.
 Free compute to apply for: Google for Startups Africa, NVIDIA Inception,
 Nigeria's national AI programmes (NITDA / N-ATLAS initiatives).
