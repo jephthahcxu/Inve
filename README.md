@@ -58,6 +58,20 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 | Training / fine-tuning / flywheel scripts | done |
 | **Trained weights** | **not yet: needs the data + a rented GPU (see docs/DATA.md)** |
 
+## Web console
+
+```bash
+pip install fastapi uvicorn
+export ELEVENLABS_API_KEY=...  ELEVENLABS_AGENT_ID=...
+python web/server.py 8000                      # talk to it + watch OJEPH train
+python scripts/lab_run.py --synth runs/synth   # live training feeding the lab panel
+```
+
+* **Live line** (labelled *interim engine*): talk now in Jephthah's voice through
+  an ElevenLabs agent, so you can demo today. This one is **not** OJEPH.
+* **OJEPH lab**: the real model's loss curve, plus a new audio clip from every
+  checkpoint, so you hear it learn.
+
 ## Quick start
 
 ```bash

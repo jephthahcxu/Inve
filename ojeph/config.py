@@ -101,7 +101,8 @@ class OjephConfig:
 def preset(name: str) -> OjephConfig:
     """Model sizes. Parameter counts are approximate.
 
-    tiny  ~  25M  -> unit tests / laptop overfit runs
+    tiny  ~  25M  -> unit tests
+    mini  ~  45M  -> CPU live lab (real Mimi codes)
     small ~ 300M  -> mini-PC demo target (fits 8 GB GPU in bf16 with KV cache)
     base  ~ 1.1B  -> quality target once data + compute are available
     """
@@ -110,6 +111,11 @@ def preset(name: str) -> OjephConfig:
             name="ojeph-tiny", text_vocab=1000, d_model=256, n_layers=4, n_heads=4,
             depth_d_model=128, depth_layers=2, depth_heads=4, max_context=512,
             codec=CodecConfig(num_codebooks=4, codebook_size=256),
+        )
+    if name == "mini":  # ~45M, real Mimi codes, trains on a CPU for the live lab
+        return OjephConfig(
+            name="ojeph-mini", text_vocab=800, d_model=512, n_layers=8, n_heads=8,
+            depth_d_model=256, depth_layers=2, depth_heads=4, max_context=1500,
         )
     if name == "small":
         return OjephConfig()

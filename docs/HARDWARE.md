@@ -2,9 +2,15 @@
 
 ## Measured
 
-`small` (350M): **56 ms per 80 ms step on a 4-core cloud CPU, fp32, 1 call**.
-The codec (Mimi) adds its own encode/decode time per frame. Measure it on
-the target box.
+On a 4-core cloud CPU, fp32, 1 call:
+
+| Part | Time per 80 ms frame |
+|---|---|
+| OJEPH `small` (350M) step | 56 ms |
+| Mimi streaming encode + decode | 44 ms |
+| **Total** | **~100 ms, so slightly too slow for real time on 4 cores** |
+
+An 8-core mini PC or any small GPU gets under the 80 ms budget.
 
 ## Recommended box for 10–20 concurrent calls (~₦1.5M–2.5M)
 
