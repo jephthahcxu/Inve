@@ -59,11 +59,15 @@ class OjephConfig:
     # conditioning
     num_speakers: int = 2          # 0 = OJEPH male (Jephthah voice), 1 = OJEPH female
     num_languages: int = 64        # language+dialect ids, see ojeph/data/languages.py
+    num_emotions: int = 16         # see ojeph/data/expressive.py (predicted every frame)
+    num_personas: int = 16         # character modes: friend, teacher, health, emergency...
+    cond_dropout: float = 0.15     # sometimes hide the persona so "auto" works too
 
     # loss weights (semantic codebook matters most for intelligibility)
     text_loss_weight: float = 1.0
     semantic_loss_weight: float = 100.0
     acoustic_loss_weight: float = 1.0
+    emotion_loss_weight: float = 2.0
 
     dropout: float = 0.0
 

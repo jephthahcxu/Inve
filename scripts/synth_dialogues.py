@@ -11,9 +11,12 @@ v3 audio tags such as [laughs], [whispers], [sighs] for natural laughter.
     python scripts/synth_dialogues.py dialogues/pidgin_seed.jsonl out/synth/
 
 Input JSONL, one conversation per line:
-    {"lang": "pidgin:lagos", "ojeph": "male",
+    {"lang": "pidgin:lagos", "ojeph": "male", "persona": "friend",
      "turns": [{"who": "caller", "text": "..."},
-               {"who": "ojeph", "text": "[laughs] ...", "gap_ms": -300}]}
+               {"who": "ojeph", "text": "[laughs] ...", "emotion": "playful", "gap_ms": -300}]}
+
+OJEPH also back-channels automatically ("Ehen", "Mm-hm", a small laugh) during
+long caller turns, so it learns to listen actively, the way people do on the phone.
 
 Check ElevenLabs' terms of service for your plan before using its output to
 train a model; the clean long-term source is your own studio recordings.
@@ -57,17 +60,20 @@ def tts(text: str, voice: str, model: str, key: str, retries: int = 4) -> tuple[
     raise RuntimeError("unreachable")
 
 
-def words_from_chars(chars: list, offset: float) -> list[tuple[float, str]]:
-    """Group character timestamps into (start_sec, word); audio tags dropped."""
-    words, cur, start, in_tag = [], "", None, False
+def words_from_chars(chars: list, offset: float):
+    """Group character timestamps into (start_sec, word) and pull out audio-tag
+    events such as [laughs] as (time_sec, tag)."""
+    words, events, cur, start, in_tag, tag, tag_t = [], [], "", None, False, "", 0.0
     for ch, t in chars:
         if ch == "[":
-            in_tag = True
+            in_tag, tag, tag_t = True, "", t
             continue
         if ch == "]":
             in_tag = False
+            events.append((tag_t + offset, tag.strip()))
             continue
         if in_tag:
+            tag += ch
             continue
         if ch.isspace():
             if cur:
@@ -79,30 +85,63 @@ def words_from_chars(chars: list, offset: float) -> list[tuple[float, str]]:
             cur += ch
     if cur:
         words.append((start + offset, cur))
-    return words
+    return words, events
 
 
-def render(conv: dict, voices: dict, key: str, model: str):
+BACKCHANNELS = ["Ehen.", "Mm-hm.", "I dey hear you.", "Okay.", "Hmm.", "Oya.", "[chuckles] Ehen."]
+_bc_cache: dict[str, tuple[np.ndarray, list]] = {}
+
+
+def backchannel(voice: str, model: str, key: str, rng: random.Random):
+    text = rng.choice(BACKCHANNELS)
+    k = f"{voice}|{text}"
+    if k not in _bc_cache:
+        _bc_cache[k] = tts(text, voice, model, key)
+    return text, _bc_cache[k]
+
+
+def _place(ch, who, audio, start):
+    s = int(start * SR)
+    need = s + audio.size
+    for c in range(2):
+        if ch[c].size < need:
+            ch[c] = np.pad(ch[c], (0, need - ch[c].size))
+    ch[who][s:s + audio.size] += audio
+
+
+def render(conv: dict, voices: dict, key: str, model: str, rng: random.Random,
+           backchannel_prob: float = 0.6):
+    """Returns stereo audio, OJEPH words, OJEPH turns (with emotion) and tag events."""
     ch = [np.zeros(0, np.float32), np.zeros(0, np.float32)]
-    ojeph_words: list[tuple[float, str]] = []
+    words, turns, events = [], [], []
     cursor = 0.0
     for turn in conv["turns"]:
         who = 0 if turn["who"] == "ojeph" else 1
         voice = voices["ojeph"] if who == 0 else voices["caller"]
         audio, chars = tts(turn["text"], voice, model, key)
-        start = max(0.0, cursor + turn.get("gap_ms", random.randint(150, 600)) / 1000)
-        s = int(start * SR)
-        need = s + audio.size
-        for c in range(2):
-            if ch[c].size < need:
-                ch[c] = np.pad(ch[c], (0, need - ch[c].size))
-        ch[who][s:s + audio.size] += audio
+        start = max(0.0, cursor + turn.get("gap_ms", rng.randint(150, 600)) / 1000)
+        _place(ch, who, audio, start)
+        dur = audio.size / SR
         if who == 0:
-            ojeph_words += words_from_chars(chars, start)
-        cursor = start + audio.size / SR
+            w, ev = words_from_chars(chars, start)
+            words += w
+            events += ev
+            turns.append({"start": start, "end": start + dur,
+                          "emotion": turn.get("emotion", "neutral")})
+        elif dur > 3.5 and rng.random() < backchannel_prob:
+            # OJEPH listens actively: a short "ehen" while the caller is talking
+            text, (bc, bchars) = backchannel(voices["ojeph"], model, key, rng)
+            t = start + rng.uniform(1.5, dur - 1.0)
+            _place(ch, 0, bc * 0.8, t)
+            w, ev = words_from_chars(bchars, t)
+            words += w
+            events += ev
+            turns.append({"start": t, "end": t + bc.size / SR, "emotion": "listening"})
+        cursor = start + dur
     n = max(c.size for c in ch)
     stereo = np.stack([np.pad(c, (0, n - c.size)) for c in ch])
-    return stereo, ojeph_words
+    words.sort()
+    return stereo, words, turns, events
 
 
 def main():
@@ -125,11 +164,12 @@ def main():
         if stem.with_suffix(".json").exists():
             continue
         print(f"[{i}] {conv['lang']} ({len(conv['turns'])} turns)")
-        stereo, words = render(conv, voices, key, model)
+        stereo, words, turns, events = render(conv, voices, key, model, random.Random(i))
         np.save(stem.with_suffix(".npy"), stereo.astype(np.float16))
         stem.with_suffix(".json").write_text(json.dumps({
             "lang": conv["lang"], "speaker": 1 if conv.get("ojeph") == "female" else 0,
-            "words": words, "sample_rate": SR, "source": "synthetic"}, ensure_ascii=False))
+            "persona": conv.get("persona", "auto"), "words": words, "turns": turns,
+            "events": events, "sample_rate": SR, "source": "synthetic"}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

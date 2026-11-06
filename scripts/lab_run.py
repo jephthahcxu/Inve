@@ -20,6 +20,7 @@ import random
 import sys
 import time
 import wave
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ojeph.config import preset  # noqa: E402
-from ojeph.data.dataset import align_text, build_tokens  # noqa: E402
+from ojeph.data.augment import phone_channel  # noqa: E402
+from ojeph.data.dataset import align_text, build_tokens, crop  # noqa: E402
+from ojeph.data.expressive import EMOTIONS, frame_emotions, persona_id  # noqa: E402
 from ojeph.data.languages import lang_id  # noqa: E402
 from ojeph.inference.offline import respond  # noqa: E402
 from ojeph.model.codec import load_codec  # noqa: E402
@@ -62,37 +65,42 @@ def train_tokenizer(synth: Path, out: Path, vocab: int) -> "spm.SentencePiecePro
     return spm.SentencePieceProcessor(model_file=str(out / "ojeph_tok.model"))
 
 
-def encode_all(synth: Path, codec, sp, cfg) -> list[dict]:
+def encode_all(synth: Path, codec, sp, cfg, phone_copies: int = 1) -> list[dict]:
+    """Each conversation once clean + `phone_copies` times with the caller
+    channel degraded like a real GSM call."""
     convs = []
+    fr = cfg.codec.frame_rate
     for m in sorted(synth.glob("*.json")):
         meta = json.loads(m.read_text())
-        audio = torch.from_numpy(np.load(m.with_suffix(".npy")).astype(np.float32))
-        codes = codec.encode(audio[:, None])           # [2, K, T]
-        T = codes.shape[-1]
-        words = [(s, sp.encode(" " + w)) for s, w in meta["words"]]
-        text = align_text(words, T, cfg.codec.frame_rate, cfg.text_pad, cfg.text_epad)
-        convs.append({"ojeph_codes": codes[0], "user_codes": codes[1], "text": text,
-                      "speaker": int(meta["speaker"]), "lang": lang_id(meta["lang"]),
-                      "name": m.stem})
+        audio = np.load(m.with_suffix(".npy")).astype(np.float32)
+        variants = [audio[1]] + [phone_channel(audio[1], seed=zlib.crc32(f"{m.stem}-{i}".encode()))
+                                 for i in range(phone_copies)]
+        oj = codec.encode(torch.from_numpy(audio[0])[None, None])[0]
+        for vi, caller in enumerate(variants):
+            us = codec.encode(torch.from_numpy(caller)[None, None])[0]
+            T = min(oj.shape[-1], us.shape[-1])
+            words = [(s, sp.encode(" " + w)) for s, w in meta["words"]]
+            text = align_text(words, T, fr, cfg.text_pad, cfg.text_epad)
+            emo = frame_emotions(T, fr, meta.get("turns", []), meta.get("events", []))
+            convs.append({"ojeph_codes": oj[:, :T], "user_codes": us[:, :T], "text": text,
+                          "emotion": emo, "persona": persona_id(meta.get("persona")),
+                          "speaker": int(meta["speaker"]), "lang": lang_id(meta["lang"]),
+                          "name": m.stem + ("" if vi == 0 else f"-phone{vi}")})
     return convs
 
 
 def batch(convs, cfg, seq, bs, rng):
-    toks, spk, lang = [], [], []
+    toks, spk, lang, emo, per = [], [], [], [], []
     for _ in range(bs):
         c = rng.choice(convs)
-        tok = build_tokens(c, cfg)
-        T = tok.shape[-1]
-        s = rng.randrange(0, max(1, T - seq))
-        tok = tok[:, s:s + seq]
-        if tok.shape[-1] < seq:
-            fill = torch.full((tok.shape[0], seq - tok.shape[-1]), cfg.audio_pad, dtype=torch.long)
-            fill[0] = cfg.text_pad
-            tok = torch.cat([tok, fill], 1)
+        tok, e, lg = crop(build_tokens(c, cfg), c, cfg, seq, rng)
         toks.append(tok)
+        emo.append(e)
+        lang.append(lg)
         spk.append(c["speaker"])
-        lang.append(c["lang"])
-    return torch.stack(toks), torch.tensor(spk), torch.tensor(lang)
+        per.append(c["persona"])
+    return (torch.stack(toks), torch.tensor(spk), torch.stack(lang), torch.stack(emo),
+            torch.tensor(per))
 
 
 def make_sample(model, codec, conv, cfg, step, loss, run: Path, seconds: float, prompt_s: float):
@@ -104,8 +112,14 @@ def make_sample(model, codec, conv, cfg, step, loss, run: Path, seconds: float, 
     P = int(prompt_s * fr)
     user = conv["user_codes"][:, :T]
     prompt = (conv["text"][:P], conv["ojeph_codes"][:, :P])
-    oj = respond(model, user, conv["speaker"], conv["lang"], temperature=0.7, top_k=50,
-                 prompt=prompt)
+    oj, emos = respond(model, user, conv["speaker"], conv["lang"], temperature=0.7, top_k=50,
+                       prompt=prompt, persona=conv["persona"], return_emotions=True)
+    # compress the per-frame emotion track into segments for the console
+    track, last = [], None
+    for i, e in enumerate(emos):
+        if e != last:
+            track.append([round(i / fr, 2), EMOTIONS[e]])
+            last = e
     with torch.no_grad():
         y_oj = codec.decode(oj[None])[0, 0].numpy()
         y_us = codec.decode(user[None, :, :oj.shape[-1]])[0, 0].numpy()
@@ -115,7 +129,8 @@ def make_sample(model, codec, conv, cfg, step, loss, run: Path, seconds: float, 
     write_wav(run / "samples" / f"{name}.wav", stereo, codec.sample_rate)
     (run / "samples" / f"{name}.json").write_text(json.dumps(
         {"step": step, "loss": loss, "voice": "male" if conv["speaker"] == 0 else "female",
-         "conversation": conv["name"], "seconds": n / codec.sample_rate}))
+         "conversation": conv["name"], "seconds": n / codec.sample_rate,
+         "emotions": track[:40]}))
     model.train()
 
 
@@ -156,8 +171,8 @@ def main():
         lr = a.lr * min(1.0, step / 200)
         for g in opt.param_groups:
             g["lr"] = lr
-        tok, spk, lang = batch(convs, cfg, a.seq, a.batch, rng)
-        r = model(tok, spk, lang)
+        tok, spk, lang, emo, per = batch(convs, cfg, a.seq, a.batch, rng)
+        r = model(tok, spk, lang, emo, per)
         opt.zero_grad(set_to_none=True)
         r["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -168,6 +183,7 @@ def main():
             log.write(json.dumps({"step": step, "loss": ema, "text": r["text_loss"].item(),
                                   "semantic": r["semantic_loss"].item(),
                                   "acoustic": r["acoustic_loss"].item(),
+                                  "emotion": r["emotion_loss"].item(),
                                   "sec": time.time() - t0}) + "\n")
             log.flush()
             status(run, state="training", step=step, loss=ema, params=model.num_params())

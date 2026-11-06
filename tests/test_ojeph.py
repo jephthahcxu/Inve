@@ -61,7 +61,8 @@ def test_streaming_matches_training_forward(tiny):
     for t in range(16):
         # teacher-force the step and compare the text logits through the head
         B = 1
-        x = model.bos.expand(B, 1, -1) if prev is None else model._frame_embed(prev[:, :, None])
+        x = model.bos.expand(B, 1, -1) if prev is None else \
+            model._frame_embed(prev[:, :, None]) + model.emotion_emb(torch.zeros(1, 1, dtype=torch.long))
         h = model.temporal(x + model._cond(st["speaker"], st["lang"]), st["caches"])[:, -1]
         assert torch.allclose(model.text_head(h), full["text_logits"][:, t], atol=1e-4)
         prev = tok[:, :, t]
@@ -175,3 +176,33 @@ def test_audiosocket_echo_roundtrip():
         w.close()
         server.close()
     asyncio.run(run())
+
+
+def test_emotion_instinct_and_steering(tiny):
+    from ojeph.data.expressive import EMOTION_IDS
+    model, cfg = tiny
+    tok = rand_tokens(cfg, B=2, T=16)
+    emo = torch.randint(1, len(EMOTION_IDS), (2, 16))
+    r = model(tok, torch.tensor([0, 1]), torch.tensor([1, 2]), emo, torch.tensor([1, 3]))
+    assert r["emotion_loss"] > 0 and r["emotion_logits"].shape[:2] == (2, 16)
+    st = model.init_state(1, torch.tensor([0]), torch.tensor([1]), persona=torch.tensor([2]))
+    model.step(st, None)
+    assert int(st["emotion"][0]) != 0            # it chose an emotion by itself
+    model.step(st, None, force_emotion=torch.tensor([EMOTION_IDS["laughing"]]))
+    assert int(st["emotion"][0]) == EMOTION_IDS["laughing"]
+
+
+def test_frame_emotions_labels():
+    from ojeph.data.expressive import EMOTION_IDS, frame_emotions
+    lab = frame_emotions(50, 12.5, [{"start": 1.0, "end": 2.0, "emotion": "warm"}],
+                         [(1.5, "laughs")])
+    assert lab[0] == EMOTION_IDS["listening"]
+    assert lab[13] == EMOTION_IDS["warm"]
+    assert lab[20] == EMOTION_IDS["laughing"]
+
+
+def test_phone_channel_augment():
+    from ojeph.data.augment import phone_channel
+    x = (0.3 * np.sin(2 * np.pi * 300 * np.arange(24000) / 24000)).astype(np.float32)
+    y = phone_channel(x, seed=1)
+    assert y.shape == x.shape and np.isfinite(y).all() and not np.allclose(x, y)

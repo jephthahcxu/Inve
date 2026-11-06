@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--db", default="ojeph_memory.sqlite")
     ap.add_argument("--lang", default="auto")
     ap.add_argument("--voice", choices=["male", "female"], default="male")
+    ap.add_argument("--persona", default="auto",
+                    help="character of this line: friend, health, emergency, teacher, ...")
     ap.add_argument("--port", type=int, default=9092)
     ap.add_argument("--max-calls", type=int, default=10)
     ap.add_argument("--device", default=None)
@@ -44,6 +46,7 @@ def main():
     else:
         import torch
 
+        from ojeph.data.expressive import persona_id
         from ojeph.data.languages import lang_id
         from ojeph.memory.store import MemoryStore
         from ojeph.model.codec import load_codec
@@ -62,7 +65,8 @@ def main():
         memory = MemoryStore(a.db, os.environ.get("OJEPH_UID_SECRET", "").encode())
         backend = OjephBackend(model, lambda: copy.deepcopy(base_codec), memory, tok,
                                default_lang=lang_id(a.lang),
-                               default_speaker=0 if a.voice == "male" else 1)
+                               default_speaker=0 if a.voice == "male" else 1,
+                               persona=persona_id(a.persona))
 
     asyncio.run(AudioSocketServer(backend, port=a.port, max_calls=a.max_calls).serve())
 

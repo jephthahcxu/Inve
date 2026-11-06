@@ -15,8 +15,10 @@ from ojeph.model.ojeph import Ojeph
 @torch.no_grad()
 def respond(model: Ojeph, user_codes: torch.Tensor, speaker: int, lang: int,
             temperature: float = 0.8, top_k: int = 100,
-            prompt: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
-    """user_codes: [K, T] caller codes -> OJEPH codes [K, T - delay].
+            prompt: tuple[torch.Tensor, torch.Tensor] | None = None,
+            persona: int = 0, return_emotions: bool = False):
+    """user_codes: [K, T] caller codes -> OJEPH codes [K, T - delay]
+    (plus the emotion OJEPH chose each frame if return_emotions).
 
     prompt: optional (text [P], ojeph_codes [K, P]) teacher-forced prefix, e.g.
             the first seconds of a real OJEPH turn, so generation continues it.
@@ -27,7 +29,9 @@ def respond(model: Ojeph, user_codes: torch.Tensor, speaker: int, lang: int,
     dev = next(model.parameters()).device
     user_d = apply_delay(user_codes, d, pad).to(dev)
 
-    st = model.init_state(1, torch.tensor([speaker]), torch.tensor([lang]), device=dev)
+    st = model.init_state(1, torch.tensor([speaker]), torch.tensor([lang]), device=dev,
+                          persona=torch.tensor([persona]))
+    emotions = []
     P = 0
     if prompt is not None:
         ptext, pcodes = prompt
@@ -42,6 +46,7 @@ def respond(model: Ojeph, user_codes: torch.Tensor, speaker: int, lang: int,
         else:
             text, audio = model.step(st, prev, temperature=temperature, top_k=top_k)
         out[:, t] = audio[0]
+        emotions.append(int(st["emotion"][0]))
         prev = torch.cat([text.view(1, 1), audio.view(1, -1), user_d[:, t].view(1, -1)], 1)
-    full = undo_delay(out, d)
-    return full.clamp_max(cfg.codec.codebook_size - 1).cpu()
+    full = undo_delay(out, d).clamp_max(cfg.codec.codebook_size - 1).cpu()
+    return (full, emotions) if return_emotions else full

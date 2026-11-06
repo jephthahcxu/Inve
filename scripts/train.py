@@ -84,11 +84,12 @@ def main():
             g["lr"] = lr
         logs = {}
         for micro in range(a.accum):
-            tok, spk, lang = next(iters[(step * a.accum + micro) % len(iters)])
+            tok, spk, lang, emo, per = next(iters[(step * a.accum + micro) % len(iters)])
             with amp:
-                r = model(tok.to(a.device), spk.to(a.device), lang.to(a.device))
+                r = model(tok.to(a.device), spk.to(a.device), lang.to(a.device),
+                          emo.to(a.device), per.to(a.device))
             (r["loss"] / a.accum).backward()
-            for k in ("loss", "text_loss", "semantic_loss", "acoustic_loss"):
+            for k in ("loss", "text_loss", "semantic_loss", "acoustic_loss", "emotion_loss"):
                 logs[k] = logs.get(k, 0.0) + r[k].item() / a.accum
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()

@@ -54,6 +54,10 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;fl
 canvas{width:100%;height:190px;display:block}
 .samples{margin-top:14px;display:flex;flex-direction:column;gap:10px}
 .sample{border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+.emo{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.emo span{font:500 10px "JetBrains Mono",monospace;padding:2px 6px;border-radius:5px;background:#19c37d18;color:#7fdcb0}
+.emo span.laughing,.emo span.playful,.emo span.happy{background:#f5b94222;color:var(--amber)}
+.emo span.urgent,.emo span.serious{background:#ff5d5d1c;color:#ff9a9a}
 .sample .h{display:flex;justify-content:space-between;font-size:12px;color:var(--dim);margin-bottom:6px;font-family:"JetBrains Mono",monospace}
 audio{width:100%;height:34px}
 .empty{color:var(--dim);font-size:13px;padding:10px 0}
@@ -84,7 +88,7 @@ audio{width:100%;height:34px}
 
     <section class="card">
       <h2>OJEPH lab <span class="tag green">native voice-to-voice</span></h2>
-      <p class="sub">The real model, training live. The loss falls as it learns, and every checkpoint generates a fresh clip of OJEPH speaking, straight from audio tokens with no TTS. Early clips sound like babble. Listen to them get better.</p>
+      <p class="sub">The real model, training live. The loss falls as it learns, and every checkpoint generates a fresh clip of OJEPH speaking, straight from audio tokens with no TTS. Early clips sound like babble. Listen to them get better. Under each clip: the emotions OJEPH chose by itself, second by second.</p>
       <div class="stats">
         <div class="stat"><div class="k">step</div><div class="v" id="s-step">–</div></div>
         <div class="stat"><div class="k">loss</div><div class="v" id="s-loss">–</div></div>
@@ -178,7 +182,15 @@ async function poll(){
       for (const s of d.samples){
         const el = document.createElement("div"); el.className = "sample";
         el.innerHTML = `<div class="h"><span>step ${s.step} · ${s.voice || ""}</span><span>loss ${(+s.loss).toFixed(3)}</span></div><audio controls preload="none"></audio>`;
-        el.querySelector("audio").src = s.url; box.appendChild(el);
+        el.querySelector("audio").src = s.url;
+        if (s.emotions && s.emotions.length){
+          const em = document.createElement("div"); em.className = "emo";
+          for (const [t, e] of s.emotions.slice(0, 14)){
+            const c = document.createElement("span"); c.className = e; c.textContent = `${t}s ${e}`; em.appendChild(c);
+          }
+          el.appendChild(em);
+        }
+        box.appendChild(el);
       }
     }
   } catch (e) {}

@@ -29,7 +29,7 @@ from ojeph.model.codec import Codec
 class CallStream:
     def __init__(self, model: Ojeph, codec: Codec, speaker: int = 0, lang: int = 0,
                  temperature: float = 0.8, text_temperature: float = 0.7, top_k: int = 250,
-                 device: str | None = None):
+                 device: str | None = None, persona: int = 0):
         self.model, self.codec = model, codec
         self.cfg = model.cfg
         self.K = self.cfg.codec.num_codebooks
@@ -38,7 +38,9 @@ class CallStream:
         self.temps = dict(temperature=temperature, text_temperature=text_temperature, top_k=top_k)
 
         self.state = model.init_state(1, torch.tensor([speaker]), torch.tensor([lang]),
-                                      device=self.device)
+                                      device=self.device, persona=torch.tensor([persona]))
+        self.forced_emotion: torch.Tensor | None = None
+        self.emotion_log: list[int] = []
         self.prev_frame: torch.Tensor | None = None
         self.user_hist: deque = deque(maxlen=self.d + 1)   # raw caller codes
         self.ojeph_sem_hist: deque = deque(maxlen=self.d + 1)  # OJEPH semantic codes
@@ -75,6 +77,14 @@ class CallStream:
                                           force_audio=sil[None], **self.temps)
             self.prev_frame = self._frame(text, audio, sil[None])
 
+    def steer(self, emotion: str | int | None):
+        """Force an emotion, e.g. steer("calm") on an emergency line; None = instinct."""
+        if isinstance(emotion, str):
+            from ojeph.data.expressive import EMOTION_IDS
+            emotion = EMOTION_IDS[emotion]
+        self.forced_emotion = None if emotion is None else \
+            torch.tensor([emotion], device=self.device)
+
     def close(self):
         self._stack.close()
 
@@ -105,9 +115,11 @@ class CallStream:
         user_codes = self.codec.encode(wav)[0, :, 0].to(self.device)      # [K]
         user_delayed = self._delay_user(user_codes)
 
-        text, ojeph_delayed = self.model.step(self.state, self.prev_frame, **self.temps)
+        text, ojeph_delayed = self.model.step(self.state, self.prev_frame,
+                                              force_emotion=self.forced_emotion, **self.temps)
         self.prev_frame = self._frame(text, ojeph_delayed[0], user_delayed)
         self.text_log.append(int(text[0]))
+        self.emotion_log.append(int(self.state["emotion"][0]))
 
         # un-delay OJEPH: semantic from d frames ago + acoustic from now
         self.ojeph_sem_hist.append(int(ojeph_delayed[0, 0]))

@@ -20,6 +20,29 @@ neural codec (waveform ↔ codes), the same role a phone's audio codec plays.
 Conditioning added every frame: **speaker** (male/female OJEPH) and
 **language+dialect** (can switch mid-call: code-switching is normal in Nigeria).
 
+## Emotion instinct and characters
+
+* **Emotion head**: every frame, OJEPH predicts its own emotion (listening,
+  warm, happy, laughing, playful, empathetic, calm, serious, urgent, surprised,
+  whisper, thinking). The chosen emotion is fed into the depth transformer, so
+  the voice for that frame is generated in that emotion. Next frame, it's fed
+  back as input, so emotions carry over and change naturally.
+* **Steering**: `CallStream.steer("calm")` forces an emotion (e.g. an
+  emergency line that must never laugh). `None` hands control back to instinct.
+* **Persona** (character mode) is a per-call condition: friend, teacher,
+  health, emergency, legal, farmer, business, storyteller, guardian. It's
+  randomly hidden 15% of the time in training, so the model also has a
+  sensible "auto" character.
+* **Labels**: per-turn emotions plus timed audio tags ([laughs], [whispers]…)
+  from the synthetic data, so a laugh is learned at the exact frames it happens.
+* **Active listening**: the renderer drops short OJEPH back-channels ("ehen",
+  "mm-hm", a small laugh) into long caller turns, so OJEPH learns to react
+  while you talk.
+* **Phone realism**: caller audio gets degraded (8 kHz band-limit, crowd or
+  generator noise, level jumps, dropped packets) so OJEPH can understand
+  real GSM calls.
+* Character bible: [CHARACTER.md](CHARACTER.md).
+
 ## Network
 
 * **Temporal transformer** (`small`: 1024-d, 16 layers): one step per frame, KV

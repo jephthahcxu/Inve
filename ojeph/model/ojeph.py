@@ -38,15 +38,19 @@ class Ojeph(nn.Module):
         self.user_emb = nn.ModuleList(nn.Embedding(cfg.audio_vocab_total, D) for _ in range(K))
         self.speaker_emb = nn.Embedding(cfg.num_speakers, D)
         self.lang_emb = nn.Embedding(cfg.num_languages, D)
+        self.persona_emb = nn.Embedding(cfg.num_personas, D)
+        self.emotion_emb = nn.Embedding(cfg.num_emotions, D)   # previous frame's emotion
         self.bos = nn.Parameter(torch.zeros(D))
 
         self.temporal = Transformer(D, cfg.n_layers, cfg.n_heads, cfg.ffn_mult,
                                     cfg.dropout, cfg.max_context)
         self.text_head = nn.Linear(D, cfg.text_vocab_total, bias=False)
+        self.emotion_head = nn.Linear(D, cfg.num_emotions, bias=False)  # OJEPH's instinct
 
         # depth transformer (one position per OJEPH codebook)
         self.depth_in = nn.ModuleList(nn.Linear(D, Dd, bias=False) for _ in range(K))
         self.depth_text_emb = nn.Embedding(cfg.text_vocab_total, Dd)
+        self.depth_emotion_emb = nn.Embedding(cfg.num_emotions, Dd)  # voice follows the emotion
         self.depth_audio_emb = nn.ModuleList(
             nn.Embedding(cfg.audio_vocab_total, Dd) for _ in range(K - 1))
         self.depth = Transformer(Dd, cfg.depth_layers, cfg.depth_heads, cfg.ffn_mult,
@@ -73,37 +77,50 @@ class Ojeph(nn.Module):
             x = x + self.ojeph_emb[k](tok[:, 1 + k]) + self.user_emb[k](tok[:, 1 + K + k])
         return x
 
-    def _cond(self, speaker: torch.Tensor, lang: torch.Tensor) -> torch.Tensor:
-        # speaker: [B]; lang: [B] or [B, T] (language can switch mid-call)
+    def _cond(self, speaker: torch.Tensor, lang: torch.Tensor,
+              persona: torch.Tensor | None = None) -> torch.Tensor:
+        # speaker: [B]; lang: [B] or [B, T] (language can switch mid-call); persona: [B]
         c = self.speaker_emb(speaker)[:, None]
+        if persona is not None:
+            c = c + self.persona_emb(persona)[:, None]
         l = self.lang_emb(lang)
         return c + (l[:, None] if lang.dim() == 1 else l)
 
-    def _depth_inputs(self, h: torch.Tensor, text: torch.Tensor, audio: torch.Tensor):
-        """h: [N, D], text: [N], audio: [N, K] (teacher forced) -> [N, K, Dd]."""
-        cols = [self.depth_in[0](h) + self.depth_text_emb(text)]
+    def _depth_inputs(self, h: torch.Tensor, text: torch.Tensor, audio: torch.Tensor,
+                      emotion: torch.Tensor):
+        """h: [N, D], text/emotion: [N], audio: [N, K] (teacher forced) -> [N, K, Dd]."""
+        cols = [self.depth_in[0](h) + self.depth_text_emb(text) + self.depth_emotion_emb(emotion)]
         for k in range(1, self.K):
             cols.append(self.depth_in[k](h) + self.depth_audio_emb[k - 1](audio[:, k - 1]))
         return torch.stack(cols, dim=1)
 
     # --------------------------------------------------------------- training
-    def forward(self, tokens: torch.Tensor, speaker: torch.Tensor, lang: torch.Tensor):
-        """tokens: [B, S, T] (already delayed). Returns dict of losses + logits."""
+    def forward(self, tokens: torch.Tensor, speaker: torch.Tensor, lang: torch.Tensor,
+                emotion: torch.Tensor | None = None, persona: torch.Tensor | None = None):
+        """tokens: [B, S, T] (already delayed); emotion: [B, T] labels (0 = unknown,
+        no loss); persona: [B]. Returns dict of losses + logits."""
         cfg, K = self.cfg, self.K
         B, S, T = tokens.shape
         assert S == 1 + 2 * K, f"expected {1 + 2 * K} streams, got {S}"
+        if emotion is None:
+            emotion = torch.zeros(B, T, dtype=torch.long, device=tokens.device)
+        if persona is not None and self.training and cfg.cond_dropout > 0:
+            drop = torch.rand(B, device=persona.device) < cfg.cond_dropout
+            persona = persona.masked_fill(drop, 0)  # learn the "auto" persona too
 
-        # input at t is frame t-1; frame -1 is a learned BOS
-        x = self._frame_embed(tokens)
+        # input at t is frame t-1 (tokens + emotion); frame -1 is a learned BOS
+        x = self._frame_embed(tokens) + self.emotion_emb(emotion)
         x = torch.cat([self.bos.expand(B, 1, -1), x[:, :-1]], dim=1)
-        h = self.temporal(x + self._cond(speaker, lang))      # [B, T, D]
+        h = self.temporal(x + self._cond(speaker, lang, persona))   # [B, T, D]
 
         text_logits = self.text_head(h)                           # [B, T, Vt]
+        emotion_logits = self.emotion_head(h)                     # [B, T, E]
 
         hf = h.reshape(B * T, -1)
         text_tgt = tokens[:, 0].reshape(B * T)
         audio_tgt = tokens[:, 1:1 + K].permute(0, 2, 1).reshape(B * T, K)
-        dz = self.depth(self._depth_inputs(hf, text_tgt, audio_tgt))   # [N, K, Dd]
+        dz = self.depth(self._depth_inputs(hf, text_tgt, audio_tgt,
+                                           emotion.reshape(B * T)))      # [N, K, Dd]
         audio_logits = torch.stack(
             [self.audio_heads[k](dz[:, k]) for k in range(K)], dim=1)  # [N, K, V]
 
@@ -116,42 +133,62 @@ class Ojeph(nn.Module):
                                       audio_tgt[:, 1:].reshape(-1), ignore_index=ign)
         else:
             ac_loss = torch.zeros((), device=tokens.device)
-        w = cfg.text_loss_weight + cfg.semantic_loss_weight + cfg.acoustic_loss_weight * (K - 1)
+        if (emotion > 0).any():
+            emo_loss = F.cross_entropy(emotion_logits.reshape(B * T, -1), emotion.reshape(B * T),
+                                       ignore_index=0)
+        else:
+            emo_loss = torch.zeros((), device=tokens.device)
+        w = (cfg.text_loss_weight + cfg.semantic_loss_weight
+             + cfg.acoustic_loss_weight * (K - 1) + cfg.emotion_loss_weight)
         loss = (cfg.text_loss_weight * text_loss + cfg.semantic_loss_weight * sem_loss
-                + cfg.acoustic_loss_weight * (K - 1) * ac_loss) / w
+                + cfg.acoustic_loss_weight * (K - 1) * ac_loss
+                + cfg.emotion_loss_weight * emo_loss) / w
         return {"loss": loss, "text_loss": text_loss, "semantic_loss": sem_loss,
-                "acoustic_loss": ac_loss, "text_logits": text_logits,
+                "acoustic_loss": ac_loss, "emotion_loss": emo_loss,
+                "text_logits": text_logits, "emotion_logits": emotion_logits,
                 "audio_logits": audio_logits.view(B, T, K, -1)}
 
     # -------------------------------------------------------------- streaming
     @torch.no_grad()
     def init_state(self, batch: int, speaker: torch.Tensor, lang: torch.Tensor,
-                   device=None, dtype=None):
+                   device=None, dtype=None, persona: torch.Tensor | None = None):
         p = next(self.parameters())
         device, dtype = device or p.device, dtype or p.dtype
         return {
             "caches": self.temporal.new_cache(batch, device, dtype, self.cfg.max_context),
             "speaker": speaker.to(device), "lang": lang.to(device),
-            "first": True,
+            "persona": persona.to(device) if persona is not None else None,
+            "emotion": torch.zeros(batch, dtype=torch.long, device=device),  # last frame's
         }
 
     @torch.no_grad()
     def step(self, state: dict, prev_frame: torch.Tensor | None,
              temperature: float = 0.8, top_k: int = 250, text_temperature: float = 0.7,
-             force_text: torch.Tensor | None = None, force_audio: torch.Tensor | None = None):
+             force_text: torch.Tensor | None = None, force_audio: torch.Tensor | None = None,
+             force_emotion: torch.Tensor | None = None, emotion_temperature: float = 0.6):
         """One 80 ms step.
 
         prev_frame: [B, S] tokens of frame t-1 (OJEPH's own last output + the
                     caller's real codes for t-1), or None at call start.
-        Returns (text_t [B], audio_t [B, K]) for OJEPH at frame t.
+        Returns (text_t [B], audio_t [B, K]) for OJEPH at frame t; the emotion
+        OJEPH chose for this frame is left in state["emotion"].
+        force_emotion [B] steers it (e.g. make it laugh, or keep it calm).
         """
         B = state["speaker"].shape[0]
         if prev_frame is None:
             x = self.bos.expand(B, 1, -1)
         else:
-            x = self._frame_embed(prev_frame[:, :, None])
-        x = x + self._cond(state["speaker"], state["lang"])
+            x = self._frame_embed(prev_frame[:, :, None]) + self.emotion_emb(state["emotion"])[:, None]
+        x = x + self._cond(state["speaker"], state["lang"], state.get("persona"))
         h = self.temporal(x, state["caches"])[:, -1]               # [B, D]
+
+        if force_emotion is not None:
+            emotion = force_emotion
+        else:
+            el = self.emotion_head(h)
+            el[:, 0] = float("-inf")                                # never pick "auto"
+            emotion = sample(el, emotion_temperature, 0)
+        state["emotion"] = emotion
 
         text = force_text if force_text is not None else \
             sample(self.text_head(h), text_temperature, top_k)
@@ -162,7 +199,7 @@ class Ojeph(nn.Module):
         prev = None
         for k in range(self.K):
             if k == 0:
-                inp = self.depth_in[0](h) + self.depth_text_emb(text)
+                inp = self.depth_in[0](h) + self.depth_text_emb(text) + self.depth_emotion_emb(emotion)
             else:
                 inp = self.depth_in[k](h) + self.depth_audio_emb[k - 1](prev)
             z = self.depth(inp[:, None], dcaches)[:, -1]

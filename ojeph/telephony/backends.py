@@ -66,7 +66,7 @@ class _OjephSession(Session):
         with backend.lock:  # model weights are shared; state is per call
             # each call owns its codec: streaming codec state must not be shared
             self.stream = CallStream(backend.model, backend.codec_factory(),
-                                     speaker=speaker, lang=lang)
+                                     speaker=speaker, lang=lang, persona=backend.persona)
             if backend.memory and backend.tokenizer:
                 prompt = backend.memory.memory_prompt(caller_id)
                 ids = backend.tokenizer.encode(prompt)
@@ -93,13 +93,15 @@ class _OjephSession(Session):
 
 class OjephBackend(Backend):
     def __init__(self, model, codec_factory, memory=None, tokenizer=None,
-                 default_lang: int = 0, default_speaker: int = 0):
-        """codec_factory() -> a fresh Codec per call (e.g. a deepcopy of a loaded Mimi)."""
+                 default_lang: int = 0, default_speaker: int = 0, persona: int = 0):
+        """codec_factory() -> a fresh Codec per call (e.g. a deepcopy of a loaded Mimi).
+        persona: character mode of this phone line (0 = auto, see ojeph/data/expressive.py)."""
         import torch
 
         self.model, self.codec_factory = model, codec_factory
         self.memory, self.tokenizer = memory, tokenizer
         self.default_lang, self.default_speaker = default_lang, default_speaker
+        self.persona = persona
         self.lock = threading.Lock()
         codec = codec_factory()
         with codec.streaming(1):
